@@ -73,15 +73,15 @@ pub struct RayTracingAccelerationScratchBuffer {
     buffer: Arc<Mutex<super::buffer::Buffer>>,
 }
 
+const RT_TLAS_SCRATCH_BUFFER_SIZE: usize = 256 * 1024;
+
 impl Device {
     pub fn create_ray_tracing_acceleration_scratch_buffer(
         &self,
     ) -> Result<RayTracingAccelerationScratchBuffer, BackendError> {
-        const SCRATCH_BUFFER_SIZE: usize = 1024 * 1024 * 1440;
-
         let buffer = self.create_buffer(
             super::buffer::BufferDesc::new_gpu_only(
-                SCRATCH_BUFFER_SIZE,
+                RT_TLAS_SCRATCH_BUFFER_SIZE,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             ),
             "Acceleration structure scratch buffer",
@@ -96,7 +96,6 @@ impl Device {
     pub fn create_ray_tracing_bottom_acceleration(
         &self,
         desc: &RayTracingBottomAccelerationDesc,
-        scratch_buffer: &RayTracingAccelerationScratchBuffer,
     ) -> Result<RayTracingAcceleration, BackendError> {
         //log::trace!("Creating ray tracing bottom acceleration: {:?}", desc);
 
@@ -165,7 +164,7 @@ impl Device {
             &build_range_infos,
             &max_primitive_counts,
             preallocate_bytes,
-            scratch_buffer,
+            None,
         )
     }
 
@@ -271,7 +270,7 @@ impl Device {
             &build_range_infos,
             &max_primitive_counts,
             desc.preallocate_bytes,
-            scratch_buffer,
+            Some(scratch_buffer),
         )
     }
 
@@ -282,7 +281,7 @@ impl Device {
         build_range_infos: &[vk::AccelerationStructureBuildRangeInfoKHR],
         max_primitive_counts: &[u32],
         preallocate_bytes: usize,
-        scratch_buffer: &RayTracingAccelerationScratchBuffer,
+        scratch_buffer: Option<&RayTracingAccelerationScratchBuffer>,
     ) -> Result<RayTracingAcceleration, BackendError> {
         let memory_requirements = unsafe {
             self.acceleration_structure_ext
@@ -318,71 +317,92 @@ impl Device {
             .size(backing_buffer_size as u64)
             .build();
 
-        unsafe {
-            let accel_raw = self
+        let mut tmp_scratch_buffer = None;
+        let mut scratch_buffer_lock;
+
+        let scratch_buffer = if let Some(scratch_buffer) = scratch_buffer {
+            scratch_buffer_lock = scratch_buffer.buffer.lock();
+            &mut *scratch_buffer_lock
+        } else {
+            tmp_scratch_buffer = Some(
+                self.create_buffer(
+                    super::buffer::BufferDesc::new_gpu_only(
+                        memory_requirements.build_scratch_size as usize,
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    )
+                    // TODO: query minAccelerationStructureScratchOffsetAlignment
+                    .alignment(256),
+                    "Acceleration structure scratch buffer",
+                    None,
+                )?,
+            );
+
+            tmp_scratch_buffer.as_mut().unwrap()
+        };
+
+        let do_the_build = move || -> Result<RayTracingAcceleration, BackendError> {
+            unsafe {
+                let accel_raw = self
                 .acceleration_structure_ext
                 .create_acceleration_structure(&accel_info, None)
                 //.context("create_acceleration_structure")?;
                 ?;
 
-            let scratch_buffer = scratch_buffer.buffer.lock();
-            assert!(
-                memory_requirements.build_scratch_size as usize <= scratch_buffer.desc.size,
-                "TODO: resize scratch; see `SCRATCH_BUFFER_SIZE`"
-            );
-
-            /*let scratch_buffer = self
-            .create_buffer(
-                super::buffer::BufferDesc {
-                    size: memory_requirements.build_scratch_size as _,
-                    usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                    mapped: false,
-                },
-                None,
-            )
-            .context("Acceleration structure scratch buffer")?;*/
-
-            geometry_info.dst_acceleration_structure = accel_raw;
-            geometry_info.scratch_data = ash::vk::DeviceOrHostAddressKHR {
-                device_address: self.raw.get_buffer_device_address(
-                    &ash::vk::BufferDeviceAddressInfo::builder().buffer(scratch_buffer.raw),
-                ),
-            };
-
-            self.with_setup_cb(|cb| {
-                self.acceleration_structure_ext
-                    .cmd_build_acceleration_structures(
-                        cb,
-                        std::slice::from_ref(&geometry_info),
-                        std::slice::from_ref(&build_range_infos),
-                    );
-
-                self.raw.cmd_pipeline_barrier(
-                    cb,
-                    ash::vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
-                    ash::vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
-                    ash::vk::DependencyFlags::empty(),
-                    &[ash::vk::MemoryBarrier::builder()
-                        .src_access_mask(
-                            ash::vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
-                                | ash::vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
-                        )
-                        .dst_access_mask(
-                            ash::vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
-                                | ash::vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
-                        )
-                        .build()],
-                    &[],
-                    &[],
+                assert!(
+                    memory_requirements.build_scratch_size as usize <= scratch_buffer.desc.size,
+                    "TODO: resize scratch; see `RT_SCRATCH_BUFFER_SIZE`"
                 );
-            })?;
 
-            Ok(RayTracingAcceleration {
-                raw: accel_raw,
-                backing_buffer: accel_buffer,
-            })
+                geometry_info.dst_acceleration_structure = accel_raw;
+                geometry_info.scratch_data = ash::vk::DeviceOrHostAddressKHR {
+                    device_address: self.raw.get_buffer_device_address(
+                        &ash::vk::BufferDeviceAddressInfo::builder().buffer(scratch_buffer.raw),
+                    ),
+                };
+
+                self.with_setup_cb(|cb| {
+                    self.acceleration_structure_ext
+                        .cmd_build_acceleration_structures(
+                            cb,
+                            std::slice::from_ref(&geometry_info),
+                            std::slice::from_ref(&build_range_infos),
+                        );
+
+                    self.raw.cmd_pipeline_barrier(
+                        cb,
+                        ash::vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+                        ash::vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+                        ash::vk::DependencyFlags::empty(),
+                        &[ash::vk::MemoryBarrier::builder()
+                            .src_access_mask(
+                                ash::vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
+                                    | ash::vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
+                            )
+                            .dst_access_mask(
+                                ash::vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
+                                    | ash::vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
+                            )
+                            .build()],
+                        &[],
+                        &[],
+                    );
+                })?;
+
+                Ok(RayTracingAcceleration {
+                    raw: accel_raw,
+                    backing_buffer: accel_buffer,
+                })
+            }
+        };
+
+        let res = do_the_build();
+
+        if let Some(tmp_scratch_buffer) = tmp_scratch_buffer {
+            self.immediate_destroy_buffer(tmp_scratch_buffer);
         }
+
+        res
     }
 
     pub fn fill_ray_tracing_instance_buffer(
@@ -555,7 +575,7 @@ impl Device {
             .shader_group_handle_size as usize;
         let group_count =
             (desc.raygen_entry_count + desc.miss_entry_count + desc.hit_entry_count) as usize;
-        let group_handles_size = (shader_group_handle_size * group_count) as usize;
+        let group_handles_size = shader_group_handle_size * group_count;
 
         let group_handles: Vec<u8> = unsafe {
             self.ray_tracing_pipeline_ext
@@ -753,7 +773,9 @@ pub fn create_ray_tracing_pipeline(
 
             match desc.desc.stage {
                 ShaderPipelineStage::RayGen => {
-                    assert!(prev_stage == None || prev_stage == Some(ShaderPipelineStage::RayGen));
+                    assert!(
+                        prev_stage.is_none() || prev_stage == Some(ShaderPipelineStage::RayGen)
+                    );
                     raygen_entry_count += 1;
 
                     let (module, entry_point) = create_shader_module(desc);
@@ -858,7 +880,7 @@ pub fn create_ray_tracing_pipeline(
                     .build()],
                 None,
             )
-            .unwrap()[0];
+            .expect("create_ray_tracing_pipelines")[0];
 
         let mut descriptor_pool_sizes: Vec<vk::DescriptorPoolSize> = Vec::new();
         for bindings in set_layout_info.iter() {
@@ -959,7 +981,7 @@ impl GeometryInstance {
     }
 
     fn set_flags(&mut self, flags: ash::vk::GeometryInstanceFlagsKHR) {
-        let flags = flags.as_raw() as u32;
+        let flags = flags.as_raw();
         self.instance_sbt_offset_and_flags |= flags << 24;
     }
 }

@@ -13,7 +13,7 @@ impl ComputeImageLut for BrdfFgLutComputer {
     fn create(&mut self, device: &kajiya_backend::Device) -> kajiya_backend::Image {
         device
             .create_image(
-                ImageDesc::new_2d(vk::Format::R16G16_SFLOAT, [64, 64])
+                ImageDesc::new_2d(vk::Format::R16G16B16A16_SFLOAT, [64, 64])
                     .usage(ImageUsageFlags::STORAGE | ImageUsageFlags::SAMPLED),
                 vec![],
             )
@@ -33,9 +33,11 @@ impl ComputeImageLut for BrdfFgLutComputer {
         pass.render(move |api| {
             let pipeline = api.bind_compute_pipeline(
                 pipeline.into_binding().descriptor_set(0, &[img_ref.bind()]),
-            );
+            )?;
 
             pipeline.dispatch(img_ref.desc().extent);
+
+            Ok(())
         });
     }
 }
@@ -64,9 +66,11 @@ impl ComputeImageLut for BezoldBruckeLutComputer {
         pass.render(move |api| {
             let pipeline = api.bind_compute_pipeline(
                 pipeline.into_binding().descriptor_set(0, &[img_ref.bind()]),
-            );
+            )?;
 
             pipeline.dispatch(img_ref.desc().extent);
+
+            Ok(())
         });
     }
 }

@@ -111,7 +111,7 @@ struct ShaderIncludeProvider {
     ctx: RunContext,
 }
 
-impl<'a> shader_prepper::IncludeProvider for ShaderIncludeProvider {
+impl shader_prepper::IncludeProvider for ShaderIncludeProvider {
     type IncludeContext = String;
 
     fn get_include(
@@ -181,11 +181,11 @@ fn compile_generic_shader_hlsl_impl(
         target_profile,
         &[
             "-spirv",
-            "-enable-templates",
             //"-enable-16bit-types",
             "-fspv-target-env=vulkan1.2",
-            "-WX",  // warnings as errors
-            "-Ges", // strict mode
+            "-WX",      // warnings as errors
+            "-Ges",     // strict mode
+            "-HV 2021", // HLSL version 2021
         ],
         &[],
     )

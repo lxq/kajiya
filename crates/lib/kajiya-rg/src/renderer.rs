@@ -160,7 +160,9 @@ impl Renderer {
         {
             let main_cb = &current_frame.main_command_buffer;
 
-            current_frame.profiler_data.begin_frame(device, main_cb.raw);
+            current_frame
+                .profiler_data
+                .begin_frame(&device.raw, main_cb.raw);
 
             executing_rg = {
                 puffin::profile_scope!("rg begin_execute");
@@ -255,7 +257,7 @@ impl Renderer {
 
             current_frame
                 .profiler_data
-                .finish_frame(device, presentation_cb.raw);
+                .end_frame(&device.raw, presentation_cb.raw);
 
             // Record and submit the presentation command buffer
             unsafe {
@@ -397,18 +399,21 @@ impl Renderer {
                 .build();
 
             let descriptor_set_writes = [
+                // `frame_constants`
                 vk::WriteDescriptorSet::builder()
                     .dst_binding(0)
                     .dst_set(set)
                     .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
                     .buffer_info(std::slice::from_ref(&uniform_buffer_info))
                     .build(),
+                // `instance_dynamic_parameters_dyn`
                 vk::WriteDescriptorSet::builder()
                     .dst_binding(1)
                     .dst_set(set)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
                     .buffer_info(std::slice::from_ref(&storage_buffer_info))
                     .build(),
+                // `triangle_lights_dyn`
                 vk::WriteDescriptorSet::builder()
                     .dst_binding(2)
                     .dst_set(set)
